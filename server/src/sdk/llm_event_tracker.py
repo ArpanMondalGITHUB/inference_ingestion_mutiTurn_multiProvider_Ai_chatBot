@@ -1,0 +1,123 @@
+import asyncio
+import time
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
+from uuid import uuid4
+
+import httpx
+from models.llm_enference_models import LLMInferenceEvent, TokenUsage
+
+class LLMTracker:
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        ingestion_url: str | None,
+        api_key: str | None = None,
+        enabled: bool = True,
+    ) -> None:
+        self.provider = provider
+        self.model = model
+        self.ingestion_url = ingestion_url
+        self.api_key = api_key
+        self.enabled = enabled
+
+    async def track(
+        self,
+        call: Callable[[], Awaitable[Any]],
+        input_text: str | None = None,
+        extract_output: Callable[[Any], str | None] | None = None,
+        extract_token_usage: Callable[[Any], TokenUsage | None] | None = None,
+        session_id: str | None = None,
+        conversation_id: str | None = None,
+        request_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        started_at = _now_iso()
+        start = time.perf_counter()
+
+        try:
+            result = await call()
+            ended_at = _now_iso()
+            latency_ms = round((time.perf_counter() - start) * 1000)
+
+            event = LLMInferenceEvent(
+                eventId=str(uuid4()),
+                provider=self.provider,
+                model=self.model,
+                status="success",
+                startedAt=started_at,
+                endedAt=ended_at,
+                latencyMs=latency_ms,
+                sessionId=session_id,
+                conversationId=conversation_id,
+                requestId=request_id,
+                inputPreview=_preview(input_text),
+                outputPreview=_preview(extract_output(result) if extract_output else None),
+                tokenUsage=extract_token_usage(result) if extract_token_usage else None,
+                metadata=metadata,
+            )
+
+            self._send_soon(event)
+            return result
+
+        except Exception as error:
+            ended_at = _now_iso()
+            latency_ms = round((time.perf_counter() - start) * 1000)
+
+            event = LLMInferenceEvent(
+                eventId=str(uuid4()),
+                provider=self.provider,
+                model=self.model,
+                status="error",
+                startedAt=started_at,
+                endedAt=ended_at,
+                latencyMs=latency_ms,
+                sessionId=session_id,
+                conversationId=conversation_id,
+                requestId=request_id,
+                inputPreview=_preview(input_text),
+                errorType=type(error).__name__,
+                errorMessage=str(error),
+                metadata=metadata,
+            )
+
+            self._send_soon(event)
+            raise
+
+    def _send_soon(self, event: LLMInferenceEvent) -> None:
+        if not self.enabled or not self.ingestion_url:
+            return
+
+        asyncio.create_task(self._send_event(event))
+
+    async def _send_event(self, event: LLMInferenceEvent) -> None:
+        headers = {"content-type": "application/json"}
+        if self.api_key:
+            headers["authorization"] = f"Bearer {self.api_key}"
+
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                await client.post(
+                    self.ingestion_url,
+                    headers=headers,
+                    json=event.model_dump(exclude_none=True),
+                )
+        except Exception:
+            # Do not break chat responses if logging fails.
+            pass
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _preview(value: str | None, max_length: int = 300) -> str | None:
+    if not value:
+        return None
+
+    clean = " ".join(value.split())
+    if len(clean) <= max_length:
+        return clean
+
+    return clean[: max_length - 3] + "..."
