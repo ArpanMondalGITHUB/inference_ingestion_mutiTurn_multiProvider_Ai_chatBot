@@ -1,4 +1,5 @@
 from anthropic import AsyncAnthropic
+from typing import AsyncIterator
 from models.chat_models import ChatMessage, RoleType
 from models.llm_enference_models import TokenUsage
 from provider.base import (
@@ -63,6 +64,27 @@ class AnthropicProvider:
             text=text,
             token_usage=_extract_anthropic_token_usage(response),
         )
+
+
+    async def chat_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        model: str,
+        system_prompt: str,
+    ) -> AsyncIterator[str]:
+        if self._client is None:
+            raise ProviderNotConfiguredError("Anthropic API key is not configured.")
+
+        async with self._client.messages.stream(
+            model=model,
+            max_tokens=self.max_tokens,
+            system=system_prompt,
+            messages=_messages_to_anthropic(messages),
+        ) as stream:
+            async for text_chunk in stream.text_stream:
+                yield text_chunk
+
 
 
 def _messages_to_anthropic(messages: list[ChatMessage]) -> list[dict[str, str]]:

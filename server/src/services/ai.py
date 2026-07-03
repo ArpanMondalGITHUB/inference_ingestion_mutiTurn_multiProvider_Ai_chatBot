@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, AsyncIterator
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -9,7 +9,7 @@ from core.config import (
     MAX_CONTEXT_MESSAGES,
 )
 from db.db import insert_message, list_conversations_db,get_conversation_db,get_message_for_conversations, delete_conversation_db, upsert_conversation
-from models.chat_models import ChatMessage, ChatRequest, ChatResponse, RoleType , ConversationDetail , ConversationSummary
+from models.chat_models import ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk, ChatStreamDone, ChatStreamEvent, ChatStreamStart, ProviderType, RoleType , ConversationDetail , ConversationSummary
 from provider.registry import get_provider
 from sdk.llm_event_tracker import LLMTracker
 
@@ -81,6 +81,7 @@ def _preview(messages: list[ChatMessage]) -> str:
 
 async def run_assistant(payload: ChatRequest) -> ChatResponse:
     conversation_id = payload.conversationId or str(uuid4())
+    session_id = payload.session_id or str(uuid4())
     now = _now_iso()
 
     db_messages = get_message_for_conversations(conversation_id)
@@ -112,6 +113,7 @@ async def run_assistant(payload: ChatRequest) -> ChatResponse:
         extract_output=lambda chat_result: chat_result.text,
         extract_token_usage=lambda chat_result: chat_result.token_usage,
         conversation_id=conversation_id,
+        session_id=session_id,
         request_id=request_id,
         metadata={
             "route": "/v1/api/chat",
@@ -152,3 +154,107 @@ async def run_assistant(payload: ChatRequest) -> ChatResponse:
 
 
 
+async def stream_assistant(payload:ChatRequest) -> AsyncIterator[ChatStreamEvent]:
+    conversation_id = payload.conversationId or str(uuid4())
+    session_id = payload.session_id or str(uuid4())
+    now = _now_iso()
+    
+
+    db_message = get_message_for_conversations(conversation_id)
+    message = _build_context(db_message,payload.message)
+
+    existing = get_conversation_db(conversation_id)
+    title = existing["title"] if existing else _make_title(payload.message)
+    created_at = existing["created_at"] if existing else now
+
+    provider = get_provider(payload.provider.value if payload.provider else None)
+    model = provider.resolve_model(payload.model)
+    provider_type = ProviderType(provider.id)
+    request_id = str(uuid4())
+
+    tracker = LLMTracker(
+        provider=provider.id,
+        model=model,
+        ingestion_url=LLM_INGESTION_URL,
+        api_key=LOG_INGESTION_KEY,
+        enabled=LLM_LOGGING_ENABLED,
+    )
+
+    yield ChatStreamStart(
+        conversationId=conversation_id,
+        provider=provider_type,
+        model=model,
+        requestId=request_id,
+    )
+
+    upsert_conversation(
+        conversation_id=conversation_id,
+        title=title,
+        provider=provider_type,
+        model=model,
+        created_at=created_at,
+        updated_at=now
+    )
+
+    insert_message(
+        conversation_id=conversation_id,
+        role=RoleType.USER.value,
+        content=payload.message,
+        created_at=now
+    )
+
+    parts: list[str] = []
+
+    stream = tracker.track_stream(
+        stream=provider.chat_stream(
+            messages=message,
+            model=model,
+            system_prompt=ASSISTANT_PROMPT
+        ),
+        input_text=_preview(message),
+        session_id=session_id,
+        conversation_id=conversation_id,
+        request_id=request_id,
+        metadata={
+            "operation": "stream_assistant",
+            "maxContextMessages": MAX_CONTEXT_MESSAGES,
+            "provider": provider.id,
+            "model": model,
+        }
+    )
+
+    async for chunk in stream:
+        if not chunk:
+            continue
+
+        parts.append(chunk)
+        yield ChatStreamChunk(content=chunk)
+    
+    assistant_text = "".join(parts).strip()
+    if not assistant_text:
+        raise RuntimeError(f"{provider.label} returned an empty response.")
+    
+    finished_at = _now_iso()
+
+    insert_message(
+        conversation_id=conversation_id,
+        role=RoleType.ASSISTANT.value,
+        content=assistant_text,
+        created_at=finished_at,
+    )
+
+    upsert_conversation(
+        conversation_id=conversation_id,
+        title=title,
+        provider=provider.id,
+        model=model,
+        created_at=created_at,
+        updated_at=finished_at,
+    )
+
+    yield ChatStreamDone(
+        conversationId=conversation_id,
+        message=ChatMessage(role=RoleType.ASSISTANT,content=assistant_text),
+        provider=provider_type,
+        model=model,
+    )

@@ -1,7 +1,9 @@
 import asyncio
+import threading
+from typing import AsyncIterator
 from google import genai
 from google.genai import types
-from models.chat_models import ChatMessage, RoleType
+from models.chat_models import ChatMessage
 from models.llm_enference_models import TokenUsage
 from provider.base import (
     ModelNotAllowedError,
@@ -67,6 +69,50 @@ class GeminiProvider:
             text=text,
             token_usage=_extract_gemini_token_usage(response),
         )
+        
+
+    async def chat_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        model: str,
+        system_prompt: str,
+    ) -> AsyncIterator[str]:
+        if self._client is None:
+            raise ProviderNotConfiguredError("Gemini API key is not configured.")
+
+        queue: asyncio.Queue[str | BaseException | None] = asyncio.Queue()
+        contents = _messages_to_gemini_prompt(messages)
+        loop = asyncio.get_running_loop()
+
+        def produce():
+            try:
+                for chunk in self._client.models.generate_content_stream(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt
+                    ),
+                ):
+                    if chunk.text:
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk.text)
+            except BaseException as error:
+                loop.call_soon_threadsafe(queue.put_nowait, error)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        thread = threading.Thread(target=produce, daemon=True)
+        thread.start()
+
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+
 
 
 def _messages_to_gemini_prompt(messages: list[ChatMessage]) -> str:

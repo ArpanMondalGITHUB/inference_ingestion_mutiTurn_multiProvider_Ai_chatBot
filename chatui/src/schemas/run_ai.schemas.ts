@@ -74,3 +74,39 @@ export const ConversationDetailResponseSchema = z.object({
   conversation: ConversationDetailSchema,
 });
 export type ConversationDetailResponseType = z.infer<typeof ConversationDetailResponseSchema>;
+
+
+export const ChatStreamStartSchema = z.object({
+  type: z.literal("start"),
+  conversationId: z.string(),
+  provider: ProviderTypeSchema,
+  model: z.string(),
+  requestId: z.string(),
+});
+
+export const ChatStreamChunkSchema = z.object({
+  type: z.literal("chunk"),
+  content: z.string(),
+});
+
+export const ChatStreamDoneSchema = z.object({
+  type: z.literal("done"),
+  conversationId: z.string(),
+  message: ChatMessageSchema,
+  provider: ProviderTypeSchema,
+  model: z.string(),
+});
+
+export const ChatStreamErrorSchema = z.object({
+  type: z.literal("error"),
+  message: z.string(),
+});
+
+export const ChatStreamEventSchema = z.discriminatedUnion("type", [
+  ChatStreamStartSchema,
+  ChatStreamChunkSchema,
+  ChatStreamDoneSchema,
+  ChatStreamErrorSchema,
+]);
+
+export type ChatStreamEventType = z.infer<typeof ChatStreamEventSchema>;

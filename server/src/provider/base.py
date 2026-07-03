@@ -5,7 +5,7 @@
 # chatprovider
 # provider exceptions
 
-from typing import Protocol
+from typing import Protocol , AsyncIterator
 from dataclasses import dataclass
 from models.llm_enference_models import TokenUsage
 from models.chat_models import ChatMessage
@@ -43,6 +43,15 @@ class ChatProvider(Protocol):
         model: str,
         system_prompt: str,
     ) -> ProviderChatResult:
+        ...
+        
+    async def chat_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        model: str,
+        system_prompt: str,
+    ) -> AsyncIterator[str]:
         ...
 
 # provider_exceptions
