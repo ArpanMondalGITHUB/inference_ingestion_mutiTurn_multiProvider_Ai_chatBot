@@ -1,6 +1,8 @@
+import json
 import traceback
-
+from collections.abc import AsyncIterator
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from models.chat_models import(
     ChatRequest, 
@@ -18,12 +20,19 @@ from services.ai import (
     delete_conversation,
     get_conversation, 
     list_conversations, 
-    run_assistant
+    run_assistant,
+    stream_assistant
 )
 from provider.registry import get_default_provider_id, list_configured_providers
 
 router = APIRouter()
 
+
+def _sse(event_name: str, data: dict) -> str:
+    return (
+        f"event: {event_name}\n"
+        f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+    )
 
 @router.post("/v1/api/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest) -> ChatResponse:
@@ -49,6 +58,46 @@ async def chat(payload: ChatRequest) -> ChatResponse:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(error),
         ) from error
+    
+
+@router.post("/v1/api/chat/stream")
+async def chat_stream(payload: ChatRequest) -> StreamingResponse:
+    async def events() -> AsyncIterator[str]:
+        try:
+            async for event in stream_assistant(payload):
+                event_data = event.model_dump()
+                yield _sse(event_data["type"], event_data)
+
+        except UnknownProviderError as error:
+            yield _sse("error", {
+                "type": "error",
+                "message": str(error),
+            })
+        except ModelNotAllowedError as error:
+            yield _sse("error", {
+                "type": "error",
+                "message": str(error),
+            })
+        except ProviderNotConfiguredError as error:
+            yield _sse("error", {
+                "type": "error",
+                "message": str(error),
+            })
+        except Exception as error:
+            yield _sse("error", {
+                "type": "error",
+                "message": str(error),
+            })
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
     
 @router.get("/v1/api/providers")
 async def providers() -> dict[str, object]:

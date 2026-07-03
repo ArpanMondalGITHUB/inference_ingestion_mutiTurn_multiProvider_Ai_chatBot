@@ -1,3 +1,4 @@
+from typing import AsyncIterator
 from openai import AsyncOpenAI
 from models.chat_models import ChatMessage, RoleType
 from models.llm_enference_models import TokenUsage
@@ -60,7 +61,25 @@ class OpenAIProvider:
             text=text,
             token_usage=_extract_openai_token_usage(response),
         )
+    
+    async def chat_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        model: str,
+        system_prompt: str,
+    ) -> AsyncIterator[str]:
+        if self._client is None:
+            raise ProviderNotConfiguredError("OpenAI API key is not configured.")
 
+        async with self._client.responses.stream(
+            model=model,
+            instructions=system_prompt,
+            input=_messages_to_openai_input(messages),
+        )as stream:
+            async for event in stream:
+                if event.type == "response.output_text.delta":
+                    yield event.delta
 
 def _messages_to_openai_input(messages: list[ChatMessage]) -> list[dict[str, str]]:
     return [

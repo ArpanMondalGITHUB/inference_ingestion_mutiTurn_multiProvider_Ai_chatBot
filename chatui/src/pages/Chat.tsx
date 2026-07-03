@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import type {
   ChatMessageType,
   ProviderInfoType,
   ProviderType,
-  ConversationSummaryType
+  ConversationSummaryType,
 } from "../schemas/run_ai.schemas";
 import ChatApi from "../api/chat.api";
 
@@ -28,9 +35,16 @@ function Chat() {
   const [selectedModel, setSelectedModel] = useState("");
 
   const [showSidebar, setShowSidebar] = useState(false);
-  const [conversations, setConversations] = useState<ConversationSummaryType[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummaryType[]>([],);
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [isResumingConversation, setIsResumingConversation] = useState(false);
+  const streamAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      streamAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     let ignore = false;
@@ -99,10 +113,14 @@ function Chat() {
     selectedModel.length > 0;
 
   const handleProviderChange = (providerId: ProviderType) => {
-    const nextProvider = providers.find((provider) => provider.id === providerId);
+    const nextProvider = providers.find(
+      (provider) => provider.id === providerId,
+    );
 
     setSelectedProvider(providerId);
-    setSelectedModel(nextProvider?.defaultModel ?? nextProvider?.models[0] ?? "");
+    setSelectedModel(
+      nextProvider?.defaultModel ?? nextProvider?.models[0] ?? "",
+    );
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -118,29 +136,119 @@ function Chat() {
       content: message,
     };
 
-    setMessages((currentMessages) => [...currentMessages, userMessage]);
+    const assistantMessage: ChatMessageType = {
+      role: "Assistant",
+      content: "",
+    };
+
+    setMessages((currentMessages) => [
+      ...currentMessages,
+      userMessage,
+      assistantMessage,
+    ]);
     setInput("");
     setError("");
     setIsSending(true);
 
-    try {
-      const response = await ChatApi.chat({
+    streamAbortRef.current?.abort();
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+    const isCurrentStream = () => streamAbortRef.current === controller;
+
+    await ChatApi.streamChat(
+      {
         conversationId,
         message,
         provider: selectedProvider,
         model: selectedModel,
-      });
+      },
+      {
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (!isCurrentStream()) {
+            return;
+          }
 
-      setConversationId(response.conversationId);
-      setMessages((currentMessages) => [
-        ...currentMessages,
-        response.message,
-      ]);
-    } catch {
-      setError("Could not get a response. Please try again.");
-    } finally {
-      setIsSending(false);
-    }
+          if (event.type === "start") {
+            setConversationId(event.conversationId);
+            return;
+          }
+
+          if (event.type === "chunk") {
+            setMessages((currentMessages) => {
+              const next = [...currentMessages];
+              const last = next[next.length - 1];
+
+              if (last?.role === "Assistant") {
+                next[next.length - 1] = {
+                  ...last,
+                  content: last.content + event.content,
+                };
+              }
+
+              return next;
+            });
+            return;
+          }
+
+          if (event.type === "done") {
+            setConversationId(event.conversationId);
+            setMessages((currentMessages) => {
+              const next = [...currentMessages];
+              const last = next[next.length - 1];
+
+              if (last?.role === "Assistant") {
+                next[next.length - 1] = event.message;
+              }
+
+              return next;
+            });
+            return;
+          }
+
+          if (event.type === "error") {
+            setError(event.message);
+          }
+        },
+        onError: (message) => {
+          if (isCurrentStream()) {
+            setError(message);
+          }
+        },
+        onDone: () => {
+          if (!isCurrentStream()) {
+            return;
+          }
+
+          setIsSending(false);
+          streamAbortRef.current = null;
+          setMessages((currentMessages) => {
+            const last = currentMessages[currentMessages.length - 1];
+
+            if (last?.role === "Assistant" && last.content.length === 0) {
+              return currentMessages.slice(0, -1);
+            }
+
+            return currentMessages;
+          });
+        },
+      },
+    );
+  };
+
+  const handleCancelStream = () => {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    setIsSending(false);
+    setMessages((currentMessages) => {
+      const last = currentMessages[currentMessages.length - 1];
+
+      if (last?.role === "Assistant" && last.content.length === 0) {
+        return currentMessages.slice(0, -1);
+      }
+
+      return currentMessages;
+    });
   };
 
   const handleNewChat = () => {
@@ -150,12 +258,14 @@ function Chat() {
     setError("");
   };
 
-    const handleResumeConversation = async (id: string) => {
+  const handleResumeConversation = async (id: string) => {
     setIsResumingConversation(true);
     setError("");
     try {
       const { conversation } = await ChatApi.getConversation(id);
-      const provider = providers.find((item) => item.id === conversation.provider);
+      const provider = providers.find(
+        (item) => item.id === conversation.provider,
+      );
       if (provider) {
         setSelectedProvider(provider.id);
         setSelectedModel(
@@ -221,7 +331,9 @@ function Chat() {
                 >
                   <button
                     className="conversation-resume"
-                    onClick={() => handleResumeConversation(convo.conversationId)}
+                    onClick={() =>
+                      handleResumeConversation(convo.conversationId)
+                    }
                     disabled={isResumingConversation}
                     type="button"
                   >
@@ -233,7 +345,9 @@ function Chat() {
                   </button>
                   <button
                     className="icon-button danger"
-                    onClick={() => handleCancelConversation(convo.conversationId)}
+                    onClick={() =>
+                      handleCancelConversation(convo.conversationId)
+                    }
                     type="button"
                     aria-label={`Delete: ${convo.title}`}
                   >
@@ -247,7 +361,7 @@ function Chat() {
       )}
       <section className="chat-panel" aria-label="Multi-turn chat">
         <header className="chat-header">
-            <div className="header-start">
+          <div className="header-start">
             <button
               className="icon-button"
               onClick={() => setShowSidebar((s) => !s)}
@@ -257,17 +371,21 @@ function Chat() {
             >
               ☰
             </button>
-          <div>
-            <p className="eyebrow">
-              {currentProvider ? currentProvider.label : "AI Chat"}
-            </p>
-            <h1>Multi-provider assistant</h1>
-            {selectedModel ? (
-              <p className="model-meta">{selectedModel}</p>
-            ) : null}
+            <div>
+              <p className="eyebrow">
+                {currentProvider ? currentProvider.label : "AI Chat"}
+              </p>
+              <h1>Multi-provider assistant</h1>
+              {selectedModel ? (
+                <p className="model-meta">{selectedModel}</p>
+              ) : null}
+            </div>
           </div>
-          </div>
-          <button className="secondary-button" onClick={handleNewChat} type="button">
+          <button
+            className="secondary-button"
+            onClick={handleNewChat}
+            type="button"
+          >
             New chat
           </button>
         </header>
@@ -276,7 +394,10 @@ function Chat() {
           {messages.length === 0 ? (
             <div className="empty-state">
               <h2>Start a conversation</h2>
-              <p>Ask something, then follow up. The server keeps the recent context for this chat.</p>
+              <p>
+                Ask something, then follow up. The server keeps the recent
+                context for this chat.
+              </p>
             </div>
           ) : (
             messages.map((message, index) => (
@@ -285,17 +406,17 @@ function Chat() {
                 key={`${message.role}-${index}-${message.content.slice(0, 12)}`}
               >
                 <span>{message.role}</span>
-                <p>{message.content}</p>
+                <p>
+                  {message.content ||
+                    (isSending &&
+                    index === messages.length - 1 &&
+                    message.role === "Assistant"
+                      ? "Thinking..."
+                      : "")}
+                </p>
               </article>
             ))
           )}
-
-          {isSending ? (
-            <article className="message assistant">
-              <span>Assistant</span>
-              <p>Thinking...</p>
-            </article>
-          ) : null}
         </div>
 
         {error ? <p className="error-message">{error}</p> : null}
@@ -341,8 +462,13 @@ function Chat() {
             type="text"
             value={input}
           />
-          <button disabled={!canSend} type="submit">
-            {isSending ? "Sending" : "Send"}
+          <button
+            className={isSending ? "abort-button" : undefined}
+            disabled={isSending ? false : !canSend}
+            onClick={isSending ? handleCancelStream : undefined}
+            type={isSending ? "button" : "submit"}
+          >
+            {isSending ? "Abort" : "Send"}
           </button>
         </form>
       </section>

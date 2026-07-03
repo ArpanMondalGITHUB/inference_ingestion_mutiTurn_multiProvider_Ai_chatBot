@@ -1,7 +1,7 @@
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 from uuid import uuid4
 
 import httpx
@@ -82,6 +82,88 @@ class LLMTracker:
                 metadata=metadata,
             )
 
+            self._send_soon(event)
+            raise
+
+    async def track_stream(
+        self,
+        *,
+        stream: AsyncIterator[str],
+        input_text: str | None = None,
+        session_id: str | None = None,
+        conversation_id: str | None = None,
+        request_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncIterator[str]:
+        started_at = _now_iso()
+        start = time.perf_counter()
+        first_chunk_at: float | None = None
+        chunk_count = 0
+        parts: list[str] = []
+
+        try:
+            async for chunk in stream:
+                if chunk and first_chunk_at is None:
+                    first_chunk_at = time.perf_counter()
+
+                chunk_count += 1
+                parts.append(chunk)
+                yield chunk
+
+            ended_at = _now_iso()
+            latency_ms = round((time.perf_counter() - start) * 1000)
+
+            event = LLMInferenceEvent(
+                eventId=str(uuid4()),
+                provider=self.provider,
+                model=self.model,
+                status="success",
+                startedAt=started_at,
+                endedAt=ended_at,
+                latencyMs=latency_ms,
+                conversationId=conversation_id,
+                sessionId=session_id,
+                requestId=request_id,
+                inputPreview=_preview(input_text),
+                outputPreview=_preview("".join(parts)),
+                metadata={
+                    **(metadata or {}),
+                    "stream": True,
+                    "chunkCount": chunk_count,
+                    "timeToFirstChunkMs": (
+                        round((first_chunk_at - start) * 1000)
+                        if first_chunk_at is not None
+                        else None
+                    ),
+                },
+            )
+            self._send_soon(event)
+
+        except Exception as error:
+            ended_at = _now_iso()
+            latency_ms = round((time.perf_counter() - start) * 1000)
+
+            event = LLMInferenceEvent(
+                eventId=str(uuid4()),
+                provider=self.provider,
+                model=self.model,
+                status="error",
+                startedAt=started_at,
+                endedAt=ended_at,
+                latencyMs=latency_ms,
+                conversationId=conversation_id,
+                sessionId=session_id,
+                requestId=request_id,
+                inputPreview=_preview(input_text),
+                outputPreview=_preview("".join(parts)),
+                errorType=type(error).__name__,
+                errorMessage=str(error),
+                metadata={
+                    **(metadata or {}),
+                    "stream": True,
+                    "chunkCount": chunk_count,
+                },
+            )
             self._send_soon(event)
             raise
 
