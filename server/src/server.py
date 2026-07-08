@@ -1,13 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import CORS_ORIGINS, LOG_INGESTION_KEY, MAX_EVENTS_PER_REQUEST
-from routes import llm_event_routes, run_ai_routes
+from routes import llm_event_routes, run_ai_routes , dashboard_routes
 from db.db import init_db
 
 app = FastAPI()
 
 app.include_router(run_ai_routes.router)
 app.include_router(llm_event_routes.router)
+app.include_router(dashboard_routes.router)
 
 @app.on_event("startup")
 async def startup() -> None:

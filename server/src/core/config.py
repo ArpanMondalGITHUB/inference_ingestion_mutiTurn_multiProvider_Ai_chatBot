@@ -91,3 +91,5 @@ MAX_CONTEXT_MESSAGES = _get_int_env("MAX_CONTEXT_MESSAGES", 8)
 CORS_ORIGINS = _get_csv_env("CORS_ORIGINS")
 if not CORS_ORIGINS and FRONTEND_URL:
     CORS_ORIGINS = [FRONTEND_URL.rstrip("/")]
+
+PII_REDACTION_ENABLED = os.getenv("PII_REDACTION_ENABLED", "true").lower() == "true"

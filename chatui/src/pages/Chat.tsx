@@ -6,6 +6,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { Link } from "react-router-dom";
 import type {
   ChatMessageType,
   ProviderInfoType,
@@ -301,13 +302,13 @@ function Chat() {
   };
 
   return (
-    <main className="chat-shell">
+    <main className="flex items-center min-h-screen p-6 max-sm:p-0 bg-[#eef1ed] bg-[image:linear-gradient(135deg,rgba(219,235,230,0.96),rgba(238,241,237,0.92))]">
       {showSidebar && (
-        <aside className="conversations-sidebar">
-          <div className="sidebar-header">
-            <h2>Conversations</h2>
+        <aside className="flex h-screen w-[280px] flex-shrink-0 flex-col overflow-y-auto border-r border-[#e5e7eb]">
+          <div className="flex items-center justify-between border-b border-[#e5e7eb] p-4">
+            <h2 className="m-0 text-[0.95rem] font-semibold">Conversations</h2>
             <button
-              className="icon-button"
+              className="cursor-pointer rounded-md border-none bg-transparent p-[0.4rem] text-base leading-none text-inherit hover:bg-[#f3f4f6]"
               onClick={() => setShowSidebar(false)}
               type="button"
               aria-label="Close sidebar"
@@ -317,34 +318,34 @@ function Chat() {
           </div>
 
           {isLoadingConversations ? (
-            <p className="sidebar-status">Loading…</p>
+            <p className="p-4 text-[0.85rem] text-[#6b7280]">Loading…</p>
           ) : conversations.length === 0 ? (
-            <p className="sidebar-status">No conversations yet.</p>
+            <p className="p-4 text-[0.85rem] text-[#6b7280]">No conversations yet.</p>
           ) : (
-            <ul className="conversation-list">
+            <ul className="m-0 list-none px-0 py-2">
               {conversations.map((convo) => (
                 <li
                   key={convo.conversationId}
-                  className={`conversation-item${
-                    convo.conversationId === conversationId ? " active" : ""
+                  className={`flex items-stretch gap-1 px-2 py-1${
+                    convo.conversationId === conversationId ? " bg-[#f3f4f6]" : ""
                   }`}
                 >
                   <button
-                    className="conversation-resume"
+                    className="flex flex-1 cursor-pointer flex-col gap-[0.2rem] rounded-md border-none bg-transparent p-2 text-left hover:bg-[#f3f4f6] disabled:cursor-not-allowed disabled:opacity-50"
                     onClick={() =>
                       handleResumeConversation(convo.conversationId)
                     }
                     disabled={isResumingConversation}
                     type="button"
                   >
-                    <span className="conversation-title">{convo.title}</span>
-                    <span className="conversation-meta">
+                    <span className="max-w-[190px] overflow-hidden text-ellipsis whitespace-nowrap text-[0.875rem] font-medium">{convo.title}</span>
+                    <span className="text-[0.75rem] text-[#9ca3af]">
                       {convo.messageCount} msgs ·{" "}
                       {formatRelativeTime(convo.updatedAt)}
                     </span>
                   </button>
                   <button
-                    className="icon-button danger"
+                    className="cursor-pointer rounded-md border-none bg-transparent p-[0.4rem] text-base leading-none text-inherit hover:bg-[#fee2e2] hover:text-[#dc2626]"
                     onClick={() =>
                       handleCancelConversation(convo.conversationId)
                     }
@@ -359,11 +360,14 @@ function Chat() {
           )}
         </aside>
       )}
-      <section className="chat-panel" aria-label="Multi-turn chat">
-        <header className="chat-header">
-          <div className="header-start">
+      <section
+        className="flex flex-col w-full max-w-[920px] mx-auto h-[min(760px,calc(100vh_-_48px))] overflow-hidden rounded-[8px] border border-[#d2dad2] bg-[#fbfcfa] shadow-[0_24px_70px_rgba(23,32,26,0.12)] max-sm:h-screen max-sm:rounded-none max-sm:border-0"
+        aria-label="Multi-turn chat"
+      >
+        <header className="flex items-center justify-between gap-4 border-b border-[#dce3dc] px-5 py-[18px] max-sm:flex-col max-sm:items-start">
+          <div className="flex items-center gap-3">
             <button
-              className="icon-button"
+              className="cursor-pointer rounded-md border-none bg-transparent p-[0.4rem] text-base leading-none text-inherit hover:bg-[#f3f4f6]"
               onClick={() => setShowSidebar((s) => !s)}
               type="button"
               aria-label="Toggle conversation history"
@@ -372,29 +376,37 @@ function Chat() {
               ☰
             </button>
             <div>
-              <p className="eyebrow">
+              <p className="m-0 mb-1 text-[0.78rem] font-bold uppercase text-[#63715f]">
                 {currentProvider ? currentProvider.label : "AI Chat"}
               </p>
-              <h1>Multi-provider assistant</h1>
+              <h1 className="m-0 text-[1.3rem] font-[750]">Multi-provider assistant</h1>
               {selectedModel ? (
-                <p className="model-meta">{selectedModel}</p>
+                <p className="m-0 mt-1 text-[0.82rem] text-[#586658]">{selectedModel}</p>
               ) : null}
             </div>
           </div>
-          <button
-            className="secondary-button"
-            onClick={handleNewChat}
-            type="button"
-          >
-            New chat
-          </button>
+          <div className="flex items-center gap-3">
+            <Link
+              className="inline-flex items-center min-h-[42px] cursor-pointer rounded-md border-0 bg-[#e6ece5] px-[14px] font-bold text-[#2f4437] no-underline"
+              to="/dashboard"
+            >
+              Dashboard
+            </Link>
+            <button
+              className="min-h-[42px] cursor-pointer rounded-md border-0 bg-[#e6ece5] px-[14px] font-bold text-[#2f4437]"
+              onClick={handleNewChat}
+              type="button"
+            >
+              New chat
+            </button>
+          </div>
         </header>
 
-        <div className="messages" aria-live="polite">
+        <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-5" aria-live="polite">
           {messages.length === 0 ? (
-            <div className="empty-state">
-              <h2>Start a conversation</h2>
-              <p>
+            <div className="m-auto max-w-[440px] self-center text-center text-[#586658]">
+              <h2 className="mb-2 text-[1.45rem] text-[#1f2c22]">Start a conversation</h2>
+              <p className="m-0">
                 Ask something, then follow up. The server keeps the recent
                 context for this chat.
               </p>
@@ -402,11 +414,15 @@ function Chat() {
           ) : (
             messages.map((message, index) => (
               <article
-                className={`message ${message.role === "User" ? "user" : "assistant"}`}
+                className={`max-w-[min(76%,640px)] whitespace-pre-wrap break-words rounded-[8px] border px-[14px] py-3 leading-[1.5] [&>span]:mb-[5px] [&>span]:block [&>span]:text-[0.74rem] [&>span]:font-[750] [&>span]:uppercase ${
+                  message.role === "User"
+                    ? "self-end border-[#123c34] bg-[#123c34] text-white [&>span]:text-[#b8d9d0]"
+                    : "self-start border-[#dbe3dc] bg-white [&>span]:text-[#63715f]"
+                }`}
                 key={`${message.role}-${index}-${message.content.slice(0, 12)}`}
               >
                 <span>{message.role}</span>
-                <p>
+                <p className="m-0">
                   {message.content ||
                     (isSending &&
                     index === messages.length - 1 &&
@@ -419,13 +435,20 @@ function Chat() {
           )}
         </div>
 
-        {error ? <p className="error-message">{error}</p> : null}
+        {error ? <p className="m-0 px-5 pb-3 text-[0.92rem] text-[#a43434]">{error}</p> : null}
 
-        <form className="composer" onSubmit={handleSubmit}>
-          <div className="provider-controls" aria-label="AI provider controls">
-            <label>
+        <form
+          className="flex items-end gap-[10px] border-t border-[#dce3dc] p-[14px] max-sm:flex-col max-sm:items-stretch"
+          onSubmit={handleSubmit}
+        >
+          <div
+            className="flex items-end gap-[10px] max-sm:w-full max-sm:flex-col max-sm:items-stretch"
+            aria-label="AI provider controls"
+          >
+            <label className="grid gap-1 text-[0.78rem] font-bold text-[#4d5c50]">
               Provider
               <select
+                className="min-h-[46px] min-w-[150px] rounded-md border border-[#c9d3ca] bg-white px-[10px] text-[#17201a] outline-none focus:border-[#307a69] focus:shadow-[0_0_0_3px_rgba(48,122,105,0.14)] max-sm:w-full"
                 disabled={isSending || providers.length === 0}
                 onChange={(event) =>
                   handleProviderChange(event.target.value as ProviderType)
@@ -440,9 +463,10 @@ function Chat() {
               </select>
             </label>
 
-            <label>
+            <label className="grid gap-1 text-[0.78rem] font-bold text-[#4d5c50]">
               Model
               <select
+                className="min-h-[46px] min-w-[150px] rounded-md border border-[#c9d3ca] bg-white px-[10px] text-[#17201a] outline-none focus:border-[#307a69] focus:shadow-[0_0_0_3px_rgba(48,122,105,0.14)] max-sm:w-full"
                 disabled={isSending || availableModels.length === 0}
                 onChange={(event) => setSelectedModel(event.target.value)}
                 value={selectedModel}
@@ -456,6 +480,7 @@ function Chat() {
             </label>
           </div>
           <input
+            className="min-h-[46px] min-w-0 flex-1 rounded-md border border-[#c9d3ca] px-[14px] outline-none focus:border-[#307a69] focus:shadow-[0_0_0_3px_rgba(48,122,105,0.14)]"
             aria-label="Message"
             onChange={(event) => setInput(event.target.value)}
             placeholder="Type a message..."
@@ -463,7 +488,9 @@ function Chat() {
             value={input}
           />
           <button
-            className={isSending ? "abort-button" : undefined}
+            className={`min-h-[42px] cursor-pointer rounded-md border-0 px-5 font-bold text-white disabled:cursor-not-allowed disabled:opacity-[0.55] ${
+              isSending ? "bg-[#a43434]" : "bg-[#237663]"
+            }`}
             disabled={isSending ? false : !canSend}
             onClick={isSending ? handleCancelStream : undefined}
             type={isSending ? "button" : "submit"}
