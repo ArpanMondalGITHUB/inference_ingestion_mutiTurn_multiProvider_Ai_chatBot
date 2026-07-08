@@ -1,6 +1,6 @@
 import json
 from typing import Any
-
+from datetime import datetime, timedelta, timezone
 from core.config import (DATABASE_PATH)
 import sqlite3
 from pathlib import Path
@@ -246,3 +246,97 @@ def delete_conversation_db(conversation_id: str) -> bool:
         conn.commit()
 
     return True
+
+_BUCKET_LEN = {"day": 10, "hour": 13, "minute": 16}
+
+
+def drop_iso(since_hours: int | None) -> str | None:
+    """Return an ISO-8601 'Z' cutoff for 'last N hours', or None for all-time."""
+    if not since_hours or since_hours <= 0:
+        return None
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    return cutoff.isoformat().replace("+00:00", "Z")
+
+
+def _time_clause(since_iso: str | None) -> tuple[str, list[Any]]:
+    """Build a WHERE fragment + params for an optional time window."""
+    if since_iso:
+        return "WHERE started_at >= ?", [since_iso]
+    return "", []
+
+def metrics_overview(since_iso: str | None) -> dict[str , Any]:
+    """Single-row totals used by the summary endpoint."""
+    where , params = _time_clause(since_iso=since_iso)
+    sql = f"""
+        SELECT
+            COUNT(*)                                            AS total,
+            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+            SUM(has_error)                                      AS error_count,
+            AVG(latency_ms)                                     AS avg_latency_ms,
+            MIN(latency_ms)                                     AS min_latency_ms,
+            MAX(latency_ms)                                     AS max_latency_ms,
+            SUM(COALESCE(total_tokens,0))                       AS total_tokens
+        FROM llm_inference_events
+        {where}
+    """
+    with get_connection() as conn:
+        row = conn.execute(sql,params).fetchone()
+    return dict(row)
+
+def fetch_latencies(since_iso:str | None) -> list[int]:
+    """All latency values in the window (for Python percentile computation)."""
+    where , params = _time_clause(since_iso=since_iso)
+    sql = f""" SELECT latency_ms FROM llm_inference_events {where}"""
+    with get_connection() as conn:
+        rows = conn.execute(sql,params).fetchall()
+    return [r[0] for r in rows]
+
+def latency_rows(since_iso:str | None) -> list[dict[str , Any]]:
+    """(provider, model, latency_ms) rows — grouped/percentiled in Python."""
+    where , params = _time_clause(since_iso=since_iso)
+    sql = F"""
+        SELECT
+        provider , model , latency_ms
+        FROM llm_inference_events
+        {where}
+    """
+    with get_connection() as conn:
+        rows = conn.execute(sql,params).fetchall()
+
+    return [dict(r) for r in rows]
+
+def throughput_rows(since_iso: str | None, bucket: str) -> list[dict[str, Any]]:
+    """Request counts per time bucket, with an error count per bucket."""
+    length = _BUCKET_LEN.get(bucket,13)
+    where, params = _time_clause(since_iso)
+    sql = f"""
+        SELECT
+            substr(started_at, 1, {length}) AS bucket,
+            COUNT(*)                        AS total,
+            SUM(has_error)                  AS errors
+        FROM llm_inference_events
+        {where}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+    """
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+def error_breakdown(since_iso: str | None) -> list[dict[str, Any]]:
+    """Count of errors grouped by provider/model/error_type."""
+    clause = "WHERE has_error = 1"
+    params: list[Any] = []
+    if since_iso:
+        clause += " AND started_at >= ?"
+        params.append(since_iso)
+    sql = f"""
+        SELECT provider, model, error_type, COUNT(*) AS count
+        FROM llm_inference_events
+        {clause}
+        GROUP BY provider, model, error_type
+        ORDER BY count DESC
+    """
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]

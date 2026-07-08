@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS llm_inference_events (
-  event_id INTEGER PRIMARY KEY,
+  event_id VARCHAR PRIMARY KEY,
   provider VARCHAR NOT NULL,
   model VARCHAR NOT NULL,
   status VARCHAR NOT NULL CHECK (status IN ('success', 'error')),

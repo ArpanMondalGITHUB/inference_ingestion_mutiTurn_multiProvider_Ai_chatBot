@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.*
+.vite/
+coverage/
+npm-debug.log*
+pnpm-debug.log*
+pnpm-error.log*

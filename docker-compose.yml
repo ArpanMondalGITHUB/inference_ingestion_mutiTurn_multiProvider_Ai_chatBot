@@ -1,0 +1,38 @@
+services:
+  backend:
+    build:
+      context: ./server
+    environment:
+      # Read by src/core/config.py via python-dotenv / os.getenv.
+      # DATABASE_PATH points at the SQLite file inside the mounted volume below.
+      - DATABASE_PATH=/app/data/mydb.db     
+      - CORS_ORIGINS=http://localhost:8080
+      # Add your provider keys here (or use env_file below)
+      # - GEMINI_API_KEY=...
+      # - OPENAI_API_KEY=...
+      # - ANTHROPIC_API_KEY=...
+    env_file:
+      - ./server/src/.env        # optional: keeps secrets out of this file
+    volumes:
+      # Persist the SQLite database across container restarts/rebuilds.
+      - backend_data:/app/data              
+    restart: unless-stopped
+    # No "ports:" — backend is only reachable via nginx on the internal network.
+    # Uncomment to hit it directly during development:
+    # ports:
+    #   - "8000:8000"
+
+  frontend:
+    build:
+      context: ./chatui
+      args:
+        # Baked into the JS bundle at build time. "/api" => same-origin via nginx proxy.
+        VITE_API_URL: /api
+    ports:
+      - "8080:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_data:

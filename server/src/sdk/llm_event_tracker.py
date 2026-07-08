@@ -1,4 +1,5 @@
 import asyncio
+from core.redaction import redact
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -78,7 +79,7 @@ class LLMTracker:
                 requestId=request_id,
                 inputPreview=_preview(input_text),
                 errorType=type(error).__name__,
-                errorMessage=str(error),
+                errorMessage=redact(str(error)),
                 metadata=metadata,
             )
 
@@ -157,7 +158,7 @@ class LLMTracker:
                 inputPreview=_preview(input_text),
                 outputPreview=_preview("".join(parts)),
                 errorType=type(error).__name__,
-                errorMessage=str(error),
+                errorMessage=redact(str(error)),
                 metadata={
                     **(metadata or {}),
                     "stream": True,
@@ -198,7 +199,7 @@ def _preview(value: str | None, max_length: int = 300) -> str | None:
     if not value:
         return None
 
-    clean = " ".join(value.split())
+    clean = " ".join(redact(value).split())
     if len(clean) <= max_length:
         return clean
 
