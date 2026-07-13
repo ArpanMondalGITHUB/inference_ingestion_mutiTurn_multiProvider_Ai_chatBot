@@ -5,7 +5,61 @@ events flow, how they're logged, how the design scales, and what it assumes abou
 
 ---
 
+## 0. Event Broker (Redis Streams)
+
+The emitter no longer POSTs telemetry over an in-memory HTTP task. It publishes to a
+**durable Redis Stream**, and a background consumer drains that stream into SQLite. This
+closes the "events lost on crash / no backpressure" gap.
+
+```
+LLMTracker.track / track_stream            (services/ai.py path, unchanged upstream)
+        │  broker.publish(event)
+        ▼
+events/broker.py  ──▶  XADD llm-events * data=<json>     ← durable, AOF-persisted
+        ▼
+· · · · · · · Redis Stream "llm-events" (consumer group "ingest") · · · · · · ·
+        ▼
+events/consumer.py  (run_consumer, background task started in server.py lifespan)
+        │  _drain_new()    → XREADGROUP ingest consumer-1 COUNT 50 BLOCK 5000 >
+        │  _reclaim_stale()→ XAUTOCLAIM (un-acked entries from dead/slow consumers)
+        │  per entry (_handle):
+        │    1. validate  → LLMInferenceEvent.model_validate     (same model as HTTP path)
+        │    2. enrich    → process_event(...)                   (reused from routes)
+        │    3. store     → insert_llm_event(...)                (INSERT OR IGNORE)
+        │    4. ack       → XACK llm-events ingest <id>
+        │    on invalid  → dead_letter() → XADD llm-events:dlq, then ack the original
+        ▼
+SQLite llm_inference_events
+```
+
+**Key property.** If the process crashes between `XADD` and `XACK`, the entry stays in the
+group's Pending Entries List (PEL). On restart `run_consumer()` calls `XAUTOCLAIM` and picks
+it back up — nothing is lost. `RedisService` (`events/broker.py`) owns a single shared async
+connection and is exported as a module-level singleton (`broker`), so every call site uses
+`broker.publish(...)` / `broker.ack(...)` against one connection per process.
+
+**Components**
+
+| File | Role |
+|---|---|
+| `events/broker.py` | `RedisService`: `connect` / `close` / `ensure_group` / `publish` (XADD) / `read_group` (XREADGROUP) / `claim_stale` (XAUTOCLAIM) / `ack` (XACK) / `dead_letter` |
+| `events/consumer.py` | `run_consumer()` loop: drain new + reclaim stale, validate → enrich → store → ack, DLQ on poison |
+| `server.py` lifespan | Creates the consumer group and starts `run_consumer()` as a background task on startup (when `EVENT_BROKER_ENABLED`); cancels it and closes Redis on shutdown |
+| `sdk/llm_event_tracker.py` | `_send_soon` → `_publish` → `broker.publish(...)` (best-effort, errors swallowed) |
+
+**Semantics.** At-least-once delivery from the stream, made **effectively-once** into SQLite
+by `INSERT OR IGNORE` on `event_id`. Publishing stays best-effort for the chat path — a
+failed `publish()` is swallowed so telemetry never breaks a chat — but once an event reaches
+Redis it is durably processed. The stream is trimmed at `EVENT_STREAM_MAXLEN` (approximate)
+to bound memory, and invalid payloads are parked on the `EVENT_DLQ_KEY` stream.
+
+---
+
 ## 1. Ingestion Flow
+
+> The HTTP flow below still exists and is used by **external collectors**. The app's own
+> telemetry now goes through the Redis broker in §0; the validation + storage steps
+> (`LLMInferenceEvent` → `process_event` → `insert_llm_event`) are shared by both paths.
 
 Every LLM call is wrapped by `LLMTracker` (`server/src/sdk/llm_event_tracker.py`), which
 both executes the call and produces a telemetry event. The event then travels over HTTP to
@@ -104,12 +158,15 @@ rather than accepting unauthenticated data.
 - **SQLite is the ceiling.** A single writer with file-level locking caps concurrent
   ingestion + chat writes. First scaling move: **Postgres** (connection pool, concurrent
   writers, `jsonb`, partitioning/retention on the events table).
-- **Per-event HTTP POST.** One request per event is fine at low volume; at high volume it
-  should become **client-side batching** (the endpoint already accepts batches of 100) and
-  ideally a **queue/buffer** (Kafka, SQS, Redis Stream) between emitter and store, with the
-  writer draining in bulk.
-- **Unbounded `asyncio.create_task`.** Under a burst, tasks accumulate with no backpressure
-  or concurrency cap. A bounded worker pool / queue would prevent event-loop pressure.
+- **Broker in place; batching next.** A Redis Stream now sits between emitter and store,
+  with the consumer draining in bulk (`XREADGROUP COUNT 50`). The remaining win at high
+  volume is **batching the publish side** and inserting in a single transaction per drain
+  rather than one `insert_llm_event` per entry.
+- **Backpressure is bounded, not eliminated.** The stream absorbs bursts (trimmed at
+  `EVENT_STREAM_MAXLEN`) and the consumer pulls at a fixed `COUNT`, so emitted work no longer
+  piles up as unbounded in-memory tasks. If ingestion can't keep up, lag shows as a growing
+  `XLEN` / `XPENDING` rather than event-loop pressure. Splitting the consumer into its own
+  worker container is the next isolation step.
 - **Split the collector out.** Co-locating emit + ingest shares one process's resources;
   extracting `/llm-events` into its own service lets telemetry and chat scale independently.
 
@@ -123,12 +180,18 @@ telemetry event is acceptable, but breaking a chat response is not. Concretely:
 - **Logging failures are swallowed.** Network errors, timeouts (2s), and collector 4xx/5xx
   are caught and ignored in `_send_event`; the user's chat is unaffected. **Assumption:**
   occasional gaps in telemetry are tolerable — this is not an audit log.
-- **Events can be lost.** Because delivery is in-memory fire-and-forget, a process crash or
-  restart drops any un-sent tasks. There is no local buffer, retry, or replay. **Assumption:**
-  no durability guarantee on telemetry (the fix is a durable queue — see README §5).
-- **At-least-once, deduped by design.** If retries were added, `INSERT OR IGNORE` on
-  `event_id` already makes redelivery idempotent, so the store is safe under duplicate
-  delivery.
+- **Events are durable once published.** Delivery now goes through a Redis Stream (§0), not
+  an in-memory task. A crash between publish and store leaves the entry in the group's PEL;
+  `XAUTOCLAIM` replays it on restart. **Remaining gap:** the hop *before* `XADD` is still
+  best-effort — if the process dies (or Redis is unreachable) between building the event and
+  `broker.publish()`, that one event is lost. This is a deliberately small, bounded window
+  versus the old "lost on any restart" behavior.
+- **Poison messages are dead-lettered.** An entry that fails JSON parse or Pydantic
+  validation is moved to the `llm-events:dlq` stream and acked, so one bad event can't block
+  the consumer or retry forever.
+- **At-least-once, deduped by design.** The consumer may redeliver an entry after a crash
+  (read but not yet acked); `INSERT OR IGNORE` on `event_id` makes that a no-op, so the store
+  is safe under duplicate delivery.
 - **Chat-path errors are surfaced, not hidden.** In contrast to logging, a provider failure
   during chat is recorded as an `error` event *and* propagated: `run_assistant` maps
   provider exceptions to HTTP status codes (`400` unknown provider/model, `503` not

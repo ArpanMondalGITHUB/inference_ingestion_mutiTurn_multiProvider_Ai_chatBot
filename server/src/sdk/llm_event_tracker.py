@@ -1,10 +1,11 @@
 import asyncio
+import json
 from core.redaction import redact
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
 from uuid import uuid4
-
+from events.broker import broker
 import httpx
 from models.llm_enference_models import LLMInferenceEvent, TokenUsage
 
@@ -169,27 +170,16 @@ class LLMTracker:
             raise
 
     def _send_soon(self, event: LLMInferenceEvent) -> None:
-        if not self.enabled or not self.ingestion_url:
+        if not self.enabled:
             return
 
-        asyncio.create_task(self._send_event(event))
+        asyncio.create_task(self._publish(event=event))
 
-    async def _send_event(self, event: LLMInferenceEvent) -> None:
-        headers = {"content-type": "application/json"}
-        if self.api_key:
-            headers["authorization"] = f"Bearer {self.api_key}"
-
+    async def _publish(self, event: LLMInferenceEvent) -> None:
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                await client.post(
-                    self.ingestion_url,
-                    headers=headers,
-                    json=event.model_dump(exclude_none=True),
-                )
+            await broker.publish(event.model_dump(mode="json",exclude_none=True))
         except Exception:
-            # Do not break chat responses if logging fails.
             pass
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

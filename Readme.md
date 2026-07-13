@@ -8,6 +8,9 @@ structured telemetry event for every LLM call.
 - **Backend** — FastAPI (Python 3.13), pluggable provider layer, SQLite storage.
 - **Observability** — every inference emits an `llm_inference_event` that is ingested,
   validated, and stored for later analytics.
+- **Durable telemetry** — events are published to a **Redis Stream** and drained by a
+  background consumer with per-message acknowledgement, crash-safe replay, and a
+  dead-letter queue, so telemetry survives restarts instead of being lost in memory.
 
 ---
 
@@ -70,6 +73,15 @@ pnpm run dev        # http://localhost:5173
 | `LOG_INGESTION_KEY` | Bearer token shared between emitter and `/llm-events` | — |
 | `MAX_EVENTS_PER_REQUEST` | Batch cap for ingestion | `100` |
 | `MAX_CONTEXT_MESSAGES` | History window sent to the model | `8` |
+| `REDIS_URL` | Redis connection for the event broker | `redis://localhost:6379/0` |
+| `EVENT_BROKER_ENABLED` | Start the stream consumer on boot | `true` |
+| `EVENT_STREAM_KEY` | Stream key events are published to | `llm-events` |
+| `EVENT_STREAM_GROUP` | Consumer group name | `ingest` |
+| `EVENT_CONSUMER_NAME` | This consumer's name within the group | `consumer-1` |
+| `EVENT_STREAM_MAXLEN` | Approx. max stream length (retention cap) | `100000` |
+| `EVENT_DLQ_KEY` | Dead-letter stream for poison messages | `llm-events:dlq` |
+| `EVENT_MAX_DELIVERIES` | Delivery attempts before dead-lettering | `5` |
+| `EVENT_CLAIM_MIN_IDLE_MS` | Idle time before an un-acked entry is reclaimed | `30000` |
 
 `chatui/.env`: `VITE_API_URL` — API base baked into the bundle at build time
 (`/api` in Docker for same-origin proxying; a direct URL for local dev).
@@ -79,28 +91,29 @@ pnpm run dev        # http://localhost:5173
 ## 2. Architecture Overview
 
 ```
-                 ┌────────────────────────────────────────────────┐
-  Browser  ─────▶│  nginx (:8080)   SPA + reverse proxy /api/*     │
-                 └───────────────┬────────────────────────────────┘
-                                 │  /api/*  ->  http://backend:8000
-                                 ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │  FastAPI backend (:8000)                                  │
-        │                                                           │
-        │  routes/run_ai_routes ──▶ services/ai ──▶ provider/*      │
-        │        (chat, stream,          │            (registry ->  │
-        │         conversations)         │             anthropic /  │
-        │                                │             openai /     │
-        │                                │             gemini)      │
-        │                                ▼                          │
-        │                         sdk/LLMTracker ── fire-and-forget │
-        │                                │  POST /llm-events        │
-        │  routes/llm_event_routes ◀─────┘  (validate + store)      │
-        │        │                                                  │
-        │        ▼                                                  │
-        │     db/db.py  ──▶  SQLite (conversations, messages,       │
-        │                            llm_inference_events)          │
-        └──────────────────────────────────────────────────────────┘
+  Browser ──▶ nginx (:8080) ──/api/*──▶ FastAPI backend (:8000)
+
+  ── chat path ──────────────────────────────────────────────────────────
+  routes/run_ai_routes ─▶ services/ai ─▶ provider/* (anthropic / openai / gemini)
+                                │
+                                ▼
+                         sdk/LLMTracker.track / track_stream
+                                │  broker.publish(event)   (non-blocking, best-effort)
+                                ▼
+                         events/broker.py ──XADD──▶ ┌──────────────────────────┐
+                                                    │  Redis Streams (:6379)   │
+                                                    │  "llm-events"  (+ :dlq)  │
+                                                    │  AOF-persisted, durable  │
+                                                    └───────────┬──────────────┘
+  ── ingest path (background consumer) ───────────────────────┼──────────────────
+                         events/consumer.py ◀──XREADGROUP / XAUTOCLAIM
+                                │  validate → process_event → insert_llm_event
+                                │  XACK on success · dead-letter on poison
+                                ▼
+                         db/db.py ──▶ SQLite (conversations, messages, llm_inference_events)
+
+  ── external path (still available) ────────────────────────────────────
+  POST /llm-events  (Bearer auth) ──▶ validate + store   ← for external collectors
 ```
 
 **Provider layer** — `provider/base.py` defines a `ChatProvider` protocol
@@ -165,13 +178,19 @@ analytics-oriented**:
 - **SQLite over Postgres.** Zero-config, file-backed, trivial to ship in one container —
   ideal for an assessment / single-node deploy. Cost: one writer at a time, no network
   concurrency, JSON stored as opaque text.
-- **Fire-and-forget telemetry.** `LLMTracker` emits events via `asyncio.create_task` with
-  a 2s timeout and swallows all errors, so **logging can never slow down or break a chat
-  response**. Cost: events are best-effort and can be lost on crash or timeout (see
-  Failure Handling in `ARCHITECTURE.md`).
-- **Ingestion co-located with the app.** The same service both emits and receives events
-  (`LLM_INGESTION_URL` points back at its own `/llm-events`). Simple to run; not isolated —
-  a spike in inference traffic and a spike in ingestion traffic hit the same process.
+- **Non-blocking telemetry over a durable broker.** `LLMTracker` still emits off the
+  request path via `asyncio.create_task`, but now `publish()` writes to a **Redis Stream**
+  instead of an in-memory HTTP POST, so **logging can never slow down or break a chat
+  response** *and* an emitted event is durable the moment it reaches Redis. Cost: one more
+  container to run, and a small lag between "chat done" and "row in SQLite" while the
+  consumer drains (see Failure Handling in `ARCHITECTURE.md`).
+- **In-process consumer.** The stream is drained by a background task inside the same
+  FastAPI process (lightest option for a single-node deploy). Simple to run; not fully
+  isolated — a spike in inference and a spike in ingestion still share one process. The
+  seam is ready to split into a separate worker container (`EVENT_BROKER_ENABLED=false` on
+  the web service, `true` on the worker).
+- **HTTP `/llm-events` retained.** The endpoint still exists for external collectors, so
+  the emitter can be pointed elsewhere with no code change.
 - **Fixed context window (`MAX_CONTEXT_MESSAGES = 8`).** Predictable token cost and latency
   with no summarization step. Cost: older context is silently dropped, no long-term memory.
 - **Bounded previews, not full payloads.** Inputs/outputs are truncated (~300 chars by the
@@ -186,9 +205,11 @@ analytics-oriented**:
 
 - **Move to Postgres** for real concurrency, native `jsonb` columns + GIN indexes, and
   retention/partitioning on the events table.
-- **Durable event delivery.** Replace in-memory `create_task` fire-and-forget with a real
-  queue (or a local buffer with retry/backoff) so telemetry survives restarts; add
-  dead-lettering for validation failures.
+- **Durable event delivery — done.** In-memory fire-and-forget was replaced with a
+  **Redis Streams** broker + background consumer (`events/broker.py`, `events/consumer.py`):
+  per-message `XACK`, `XAUTOCLAIM` replay of un-acked entries on crash, and a dead-letter
+  queue for poison messages. Next steps here: split the consumer into its own worker
+  container and honor `EVENT_MAX_DELIVERIES` for DLQ decisions.
 - **Fix `event_id` type affinity.** It's declared `INTEGER PRIMARY KEY` but holds UUID
   strings; SQLite tolerates this via flexible typing, but the column should be `TEXT`.
 - **Capture streaming token usage.** The streaming path records `chunkCount` /

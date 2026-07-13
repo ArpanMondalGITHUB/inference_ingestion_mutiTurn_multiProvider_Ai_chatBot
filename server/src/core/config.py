@@ -93,3 +93,14 @@ if not CORS_ORIGINS and FRONTEND_URL:
     CORS_ORIGINS = [FRONTEND_URL.rstrip("/")]
 
 PII_REDACTION_ENABLED = os.getenv("PII_REDACTION_ENABLED", "true").lower() == "true"
+
+# Redis Streams
+REDIS_URL            = _clean_env("REDIS_URL") or "redis://localhost:6379/0"
+EVENT_BROKER_ENABLED = _get_bool_env("EVENT_BROKER_ENABLED", default=True)
+EVENT_STREAM_KEY     = _clean_env("EVENT_STREAM_KEY") or "llm-events"
+EVENT_STREAM_GROUP   = _clean_env("EVENT_STREAM_GROUP") or "ingest"
+EVENT_CONSUMER_NAME  = _clean_env("EVENT_CONSUMER_NAME") or "consumer-1"
+EVENT_STREAM_MAXLEN  = _get_int_env("EVENT_STREAM_MAXLEN", 100_000)  # cap stream size (~ retention)
+EVENT_DLQ_KEY        = _clean_env("EVENT_DLQ_KEY") or "llm-events:dlq"
+EVENT_MAX_DELIVERIES = _get_int_env("EVENT_MAX_DELIVERIES", 5)       # tries before dead-letter
+EVENT_CLAIM_MIN_IDLE_MS = _get_int_env("EVENT_CLAIM_MIN_IDLE_MS", 30_000)
