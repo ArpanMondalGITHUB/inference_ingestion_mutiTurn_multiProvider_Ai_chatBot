@@ -1,4 +1,11 @@
 services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]   # AOF = durability across restarts
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
   backend:
     build:
       context: ./server
@@ -7,10 +14,13 @@ services:
       # DATABASE_PATH points at the SQLite file inside the mounted volume below.
       - DATABASE_PATH=/app/data/mydb.db     
       - CORS_ORIGINS=http://localhost:8080
+      - REDIS_URL=redis://redis:6379/0 
       # Add your provider keys here (or use env_file below)
       # - GEMINI_API_KEY=...
       # - OPENAI_API_KEY=...
       # - ANTHROPIC_API_KEY=...
+    depends_on:
+      - redis
     env_file:
       - ./server/src/.env        # optional: keeps secrets out of this file
     volumes:
@@ -36,3 +46,4 @@ services:
 
 volumes:
   backend_data:
+  redis_data:
